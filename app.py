@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import datetime
 import sqlite3
-import webbrowser
 
 # --- DATABASE SETUP ---
 DB_NAME = "nse_52week_history.db"
@@ -10,7 +9,6 @@ DB_NAME = "nse_52week_history.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    # Table to track daily 52-week highs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_highs (
             date TEXT,
@@ -29,7 +27,6 @@ def save_today_data(df):
     conn = sqlite3.connect(DB_NAME)
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     
-    # Check if today's data is already logged to prevent duplicates
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM daily_highs WHERE date = ?", (today_str,))
     if cursor.fetchone()[0] == 0:
@@ -47,20 +44,22 @@ def get_historical_counts(months=6):
     cutoff_date = (datetime.date.today() - datetime.timedelta(days=months*30)).strftime("%Y-%m-%d")
     
     query = f"""
-        SELECT symbol, COUNT(*) as hit_count 
+        SELECT symbol AS Symbol, COUNT(*) as hit_count 
         FROM daily_highs 
         WHERE date >= '{cutoff_date}' 
         GROUP BY symbol
     """
     df_counts = pd.read_sql_query(query, conn)
     conn.close()
+    
+    # Fallback: If DB is empty, return a properly structured empty DataFrame
+    if df_counts.empty:
+        return pd.DataFrame(columns=['Symbol', 'hit_count'])
+        
     return df_counts
 
-# --- SIMULATED DATA FETCHING (Replace with Scraper/API connection) ---
+# --- SIMULATED DATA FETCHING ---
 def fetch_nse_52week_highs():
-    # In production, use Playwright/Selenium to scrape the NSE URL or use a paid API like Kite/Punch
-    # Returning mock data for demonstration matching today's format
-    today = datetime.date.today().strftime("%Y-%m-%d")
     mock_data = {
         'Symbol': ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ZOMATO', 'TATASTEEL'],
         'High': [2540.0, 4120.5, 1680.0, 1710.2, 195.4, 158.2],
@@ -72,15 +71,9 @@ def fetch_nse_52week_highs():
 
 # --- AUTOMATED ALGORITHMIC ANALYSIS ---
 def analyze_interesting_stocks(df, df_history):
-    """
-    Automated Rules for 'Interesting Stocks':
-    1. High Momentum: Change % > 3% on the breakout day.
-    2. Volume Surge: Highest volume relative to others today.
-    3. Repeat Offenders: Has hit 52-week high > 5 times in last 6 months (Consistent structural uptrend).
-    """
     interesting = []
     
-    # Merge current data with historical hit count
+    # Clean merge safely matching 'Symbol'
     df_merged = pd.merge(df, df_history, on='Symbol', how='left').fillna(0)
     
     for _, row in df_merged.iterrows():
@@ -89,7 +82,7 @@ def analyze_interesting_stocks(df, df_history):
             reasons.append("High Momentum (>3% gain)")
         if row['Volume'] > df_merged['Volume'].median() * 1.5:
             reasons.append("Volume Surge")
-        if row['hit_count'] > 4:
+        if 'hit_count' in row and row['hit_count'] > 4:
             reasons.append(f"Frequent Runner ({int(row['hit_count'])} times in 6mo)")
             
         if reasons:
@@ -97,7 +90,7 @@ def analyze_interesting_stocks(df, df_history):
                 "Symbol": row['Symbol'],
                 "Price": row['High'],
                 "Change %": f"{row['Change_Pct']}%",
-                "6Mo Hits": int(row['hit_count']),
+                "6Mo Hits": int(row['hit_count']) if 'hit_count' in row else 0,
                 "Analysis/Trigger": " & ".join(reasons)
             })
             
@@ -108,25 +101,30 @@ st.set_page_config(layout="wide", page_title="NSE 52-Week High Dashboard")
 st.title("📈 NSE 52-Week High Automated Tracking Portal")
 st.write(f"Data Date: {datetime.date.today().strftime('%A, %d %B %Y')}")
 
+# Initialize and pull data safely
 init_db()
-
-# Fetch and sync
 df_today = fetch_nse_52week_highs()
 save_today_data(df_today)
 df_history_counts = get_historical_counts(months=6)
 
-# Merge counts into Today's view
-df_display = pd.merge(df_today, df_history_counts, on='Symbol', how='left').fillna(1)
-df_display.rename(columns={'hit_count': 'Hits in Last 6 Mos'}, inplace=True)
+# Safe Merge Execution
+if not df_history_counts.empty and 'Symbol' in df_history_counts.columns:
+    df_display = pd.merge(df_today, df_history_counts, on='Symbol', how='left').fillna(0)
+else:
+    df_display = df_today.copy()
+    df_display['hit_count'] = 0
+
+if 'hit_count' in df_display.columns:
+    df_display.rename(columns={'hit_count': 'Hits in Last 6 Mos'}, inplace=True)
 
 # Layout Columns
 col1, col2 = st.columns([3, 2])
 
 with col1:
     st.subheader("🎯 Today's 52-Week High List")
-    st.caption("💡 Click on a row to analyze. Use the links below to instantly view charts.")
+    st.caption("💡 Use the links below to instantly view charts in a new tab.")
     
-    # Add external interactive links mimicking double click behavior via native column configuration
+    # Native redirection URL column configuration
     df_display['Chart Link'] = df_display['Symbol'].apply(lambda x: f"https://www.tradingview.com/chart/?symbol=NSE:{x}")
     
     st.data_editor(
@@ -140,7 +138,6 @@ with col1:
 
 with col2:
     st.subheader("🤖 Automated Analysis: Interesting Stocks")
-    st.write("System scanning for unusual volume, high momentum breakout patterns, and consistent runners:")
     
     df_interesting = analyze_interesting_stocks(df_today, df_history_counts)
     
@@ -152,4 +149,4 @@ with col2:
                 st.markdown(f"[View Live Technicals](https://www.tradingview.com/chart/?symbol=NSE:{row['Symbol']})")
                 st.divider()
     else:
-        st.info("No stocks met the abnormal scanner criteria today. Showing normal trends.")
+        st.info("Scanning complete. No stocks broke abnormal volume or momentum triggers right now.")
